@@ -28,11 +28,13 @@ export default function App() {
   const [panelHidden, setPanelHidden] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
 
-  // Voice Tone / Pitch States
+  // Voice Tone / Pitch / Studio EQ States
   const [activePresetId, setActivePresetId] = useState<string>('original');
-  const [pitchSemitones, setPitchSemitones] = useState<number>(0);
-  const [toneBrightness, setToneBrightness] = useState<number>(0);
-  const [volume, setVolume] = useState<number>(1.0);
+  const [pitchSemitones, setPitchSemitones] = useState<number>(0); // -24 to +24 st
+  const [bassGain, setBassGain] = useState<number>(0);             // -12 to +15 dB
+  const [midGain, setMidGain] = useState<number>(0);               // -10 to +10 dB
+  const [trebleGain, setTrebleGain] = useState<number>(0);         // -15 to +15 dB
+  const [volume, setVolume] = useState<number>(1.0);               // 0 to 2.0 (0% - 200%)
 
   // Playback states
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
@@ -41,7 +43,7 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [duration, setDuration] = useState<number>(0);
   const [statusMessage, setStatusMessage] = useState<string>(
-    'अपनी ऑडियो फ़ाइल अपलोड करें और तोता, बच्चा, बुजुर्ग जैसी टोन में आवाज़ बदलें।'
+    'अपनी ऑडियो फ़ाइल अपलोड करें और तोता, बच्चा, बुजुर्ग, दानव जैसी टोन में आवाज़ बदलें।'
   );
   const [statusType, setStatusType] = useState<'ok' | 'err' | 'info' | 'warn'>('ok');
 
@@ -62,10 +64,12 @@ export default function App() {
   const audioSourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
   const mediaStreamDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
 
-  // DSP Filter Nodes
+  // 5-Band Studio Vocal DSP Filter Nodes
   const lowCutFilterRef = useRef<BiquadFilterNode | null>(null);
+  const bassFilterRef = useRef<BiquadFilterNode | null>(null);
+  const midFilterRef = useRef<BiquadFilterNode | null>(null);
   const formantFilterRef = useRef<BiquadFilterNode | null>(null);
-  const brightnessFilterRef = useRef<BiquadFilterNode | null>(null);
+  const trebleFilterRef = useRef<BiquadFilterNode | null>(null);
   const compressorRef = useRef<DynamicsCompressorNode | null>(null);
   const masterGainRef = useRef<GainNode | null>(null);
 
@@ -88,39 +92,53 @@ export default function App() {
         (audioRef.current as any).webkitPreservesPitch = false;
 
         const pitchRatio = semitonesToPitchRatio(semitones);
-        const finalRate = Math.max(0.25, Math.min(3.0, pitchRatio * spd));
+        // Supports massive range: 0.15 (super deep monster) to 4.5 (super thin squeaky cartoon)
+        const finalRate = Math.max(0.15, Math.min(4.5, pitchRatio * spd));
         audioRef.current.playbackRate = finalRate;
       }
     },
     []
   );
 
-  // Initialize Web Audio Graph with complete DSP processing
+  // Initialize Web Audio Graph with complete 5-band studio vocal processing
   const ensureAudioContext = useCallback(() => {
     if (!audioCtxRef.current) {
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
       const ctx = new AudioCtxClass();
 
-      // 1. Low Cut Filter (Highpass) to eliminate mud and mic rumble
+      // 1. Low Cut Filter (Highpass) to eliminate subsonic mud and mic rumble
       const lowCut = ctx.createBiquadFilter();
       lowCut.type = 'highpass';
-      lowCut.frequency.value = 60;
+      lowCut.frequency.value = 50;
       lowCut.Q.value = 0.7;
 
-      // 2. Formant Peaking Filter to tune voice character resonances
+      // 2. Deep Bass Shelf Filter (120 Hz) for chest resonance / heavy voice
+      const bass = ctx.createBiquadFilter();
+      bass.type = 'lowshelf';
+      bass.frequency.value = 120;
+      bass.gain.value = bassGain;
+
+      // 3. Vocal Midrange Filter (1200 Hz) for clarity and presence
+      const mid = ctx.createBiquadFilter();
+      mid.type = 'peaking';
+      mid.frequency.value = 1200;
+      mid.Q.value = 1.0;
+      mid.gain.value = midGain;
+
+      // 4. Formant Peaking Filter to tune throat / character resonance
       const formant = ctx.createBiquadFilter();
       formant.type = 'peaking';
       formant.frequency.value = 1500;
-      formant.Q.value = 1.0;
+      formant.Q.value = 0.7;
       formant.gain.value = 0;
 
-      // 3. Brightness / High Shelf Filter for clarity and air
-      const brightness = ctx.createBiquadFilter();
-      brightness.type = 'highshelf';
-      brightness.frequency.value = 3600;
-      brightness.gain.value = 0;
+      // 5. Treble / High Shelf Filter (3800 Hz) for crisp air, sparkle, and squeakiness
+      const treble = ctx.createBiquadFilter();
+      treble.type = 'highshelf';
+      treble.frequency.value = 3800;
+      treble.gain.value = trebleGain;
 
-      // 4. Dynamics Compressor for tight, clean, punchy vocal delivery without distortion
+      // 6. Dynamics Compressor for tight, clean, punchy vocal delivery without distortion
       const comp = ctx.createDynamicsCompressor();
       comp.threshold.value = -16;
       comp.knee.value = 12;
@@ -128,22 +146,24 @@ export default function App() {
       comp.attack.value = 0.003;
       comp.release.value = 0.25;
 
-      // 5. Master Gain Node (Volume slider)
+      // 7. Master Gain Node (Volume boost slider, up to 200%)
       const gain = ctx.createGain();
       gain.gain.value = volume;
 
-      // 6. Analyser Node for Visualizer and Lip-sync
+      // 8. Analyser Node for Visualizer and Lip-sync
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 512;
       analyser.smoothingTimeConstant = 0.55;
 
-      // 7. MediaStreamDestination for recording audio into video
+      // 9. MediaStreamDestination for recording audio directly into video
       const streamDest = ctx.createMediaStreamDestination();
 
       audioCtxRef.current = ctx;
       lowCutFilterRef.current = lowCut;
+      bassFilterRef.current = bass;
+      midFilterRef.current = mid;
       formantFilterRef.current = formant;
-      brightnessFilterRef.current = brightness;
+      trebleFilterRef.current = treble;
       compressorRef.current = comp;
       masterGainRef.current = gain;
       analyserNodeRef.current = analyser;
@@ -152,11 +172,14 @@ export default function App() {
       if (audioRef.current && !audioSourceNodeRef.current) {
         try {
           const source = ctx.createMediaElementSource(audioRef.current);
-          // Chain: source -> lowCut -> formant -> brightness -> compressor -> gain -> analyser -> [dest, streamDest]
+          // Complete Studio Signal Chain:
+          // source -> lowCut -> bass -> mid -> formant -> treble -> compressor -> gain -> analyser -> [speakers, streamDest]
           source.connect(lowCut);
-          lowCut.connect(formant);
-          formant.connect(brightness);
-          brightness.connect(comp);
+          lowCut.connect(bass);
+          bass.connect(mid);
+          mid.connect(formant);
+          formant.connect(treble);
+          treble.connect(comp);
           comp.connect(gain);
           gain.connect(analyser);
 
@@ -175,7 +198,7 @@ export default function App() {
     }
 
     return analyserNodeRef.current;
-  }, [volume]);
+  }, [bassGain, midGain, trebleGain, volume]);
 
   // Setup HTML5 Audio element
   useEffect(() => {
@@ -373,40 +396,49 @@ export default function App() {
     setStatusType('info');
   };
 
-  // Select Voice Effect Preset (Parrot, Child, Elder, Robot, Studio, Original)
+  // Select Voice Effect Preset (Parrot, Chipmunk, Giant, Child, Elder, Studio, Robot, Original)
   const handleSelectPreset = (presetId: string) => {
     const preset =
       VOICE_EFFECT_PRESETS.find((p) => p.id === presetId) || VOICE_EFFECT_PRESETS[0];
 
     setActivePresetId(preset.id);
     setPitchSemitones(preset.pitchSemitones);
-    setToneBrightness(preset.toneBrightness);
+    setBassGain(preset.bassGain);
+    setMidGain(preset.midGain);
+    setTrebleGain(preset.trebleGain);
 
     ensureAudioContext();
 
-    // Apply DSP settings
+    // Apply pitch and speed
     applyPitchAndSpeed(preset.pitchSemitones, speed);
 
-    if (lowCutFilterRef.current) {
-      lowCutFilterRef.current.frequency.setTargetAtTime(preset.lowCutFreq, audioCtxRef.current!.currentTime, 0.05);
-    }
-
-    if (formantFilterRef.current) {
-      formantFilterRef.current.frequency.setTargetAtTime(preset.formantFreq, audioCtxRef.current!.currentTime, 0.05);
-      formantFilterRef.current.Q.setTargetAtTime(preset.formantQ, audioCtxRef.current!.currentTime, 0.05);
-      const gainVal = preset.id === 'original' ? 0 : preset.id === 'parrot' ? 6 : preset.id === 'child' ? 4 : 3;
-      formantFilterRef.current.gain.setTargetAtTime(gainVal, audioCtxRef.current!.currentTime, 0.05);
-    }
-
-    if (brightnessFilterRef.current) {
-      brightnessFilterRef.current.gain.setTargetAtTime(preset.toneBrightness, audioCtxRef.current!.currentTime, 0.05);
+    if (audioCtxRef.current) {
+      const now = audioCtxRef.current.currentTime;
+      if (lowCutFilterRef.current) {
+        lowCutFilterRef.current.frequency.setTargetAtTime(preset.lowCutFreq, now, 0.05);
+      }
+      if (bassFilterRef.current) {
+        bassFilterRef.current.gain.setTargetAtTime(preset.bassGain, now, 0.05);
+      }
+      if (midFilterRef.current) {
+        midFilterRef.current.gain.setTargetAtTime(preset.midGain, now, 0.05);
+      }
+      if (formantFilterRef.current) {
+        formantFilterRef.current.frequency.setTargetAtTime(preset.formantFreq, now, 0.05);
+        formantFilterRef.current.Q.setTargetAtTime(preset.formantQ, now, 0.05);
+        const gainVal = preset.id === 'original' ? 0 : preset.id === 'parrot' ? 6 : preset.id === 'chipmunk' ? 8 : preset.id === 'giant' ? 5 : 3;
+        formantFilterRef.current.gain.setTargetAtTime(gainVal, now, 0.05);
+      }
+      if (trebleFilterRef.current) {
+        trebleFilterRef.current.gain.setTargetAtTime(preset.trebleGain, now, 0.05);
+      }
     }
 
     setStatusMessage(`आवाज़ का मोड: ${preset.hindiName} ${preset.icon} (${formatSemitones(preset.pitchSemitones)})`);
     setStatusType('ok');
   };
 
-  // Manual Pitch Slider Change
+  // Manual Pitch Slider Change (-24 to +24 st)
   const handleChangePitch = (val: number) => {
     setPitchSemitones(val);
     setActivePresetId('custom');
@@ -414,23 +446,53 @@ export default function App() {
     applyPitchAndSpeed(val, speed);
   };
 
-  // Manual Tone Brightness Slider Change
-  const handleChangeTone = (val: number) => {
-    setToneBrightness(val);
+  // Manual Bass Gain Change (-12 to +15 dB)
+  const handleChangeBass = (val: number) => {
+    setBassGain(val);
     setActivePresetId('custom');
     ensureAudioContext();
-    if (brightnessFilterRef.current && audioCtxRef.current) {
-      brightnessFilterRef.current.gain.setTargetAtTime(val, audioCtxRef.current.currentTime, 0.05);
+    if (bassFilterRef.current && audioCtxRef.current) {
+      bassFilterRef.current.gain.setTargetAtTime(val, audioCtxRef.current.currentTime, 0.05);
     }
   };
 
-  // Manual Volume Slider Change
+  // Manual Mid Gain Change (-10 to +10 dB)
+  const handleChangeMid = (val: number) => {
+    setMidGain(val);
+    setActivePresetId('custom');
+    ensureAudioContext();
+    if (midFilterRef.current && audioCtxRef.current) {
+      midFilterRef.current.gain.setTargetAtTime(val, audioCtxRef.current.currentTime, 0.05);
+    }
+  };
+
+  // Manual Treble Gain Change (-15 to +15 dB)
+  const handleChangeTreble = (val: number) => {
+    setTrebleGain(val);
+    setActivePresetId('custom');
+    ensureAudioContext();
+    if (trebleFilterRef.current && audioCtxRef.current) {
+      trebleFilterRef.current.gain.setTargetAtTime(val, audioCtxRef.current.currentTime, 0.05);
+    }
+  };
+
+  // Manual Volume Slider Change (0 to 2.0x / 200%)
   const handleChangeVolume = (val: number) => {
     setVolume(val);
     ensureAudioContext();
     if (masterGainRef.current && audioCtxRef.current) {
       masterGainRef.current.gain.setTargetAtTime(val, audioCtxRef.current.currentTime, 0.05);
     }
+  };
+
+  // Reset All Audio Effects to pristine defaults
+  const handleResetEffects = () => {
+    handleSelectPreset('original');
+    setSpeed(1.0);
+    setVolume(1.0);
+    applyPitchAndSpeed(0, 1.0);
+    setStatusMessage('सभी ऑडियो इफ़ेक्ट सामान्य (Reset) कर दिए गए हैं।');
+    setStatusType('info');
   };
 
   // Play audio
@@ -692,15 +754,20 @@ export default function App() {
         onOpenVideoModal={() => setIsVideoModalOpen(true)}
         autoHideOnRecord={autoHideOnRecord}
         onToggleAutoHideOnRecord={(val) => setAutoHideOnRecord(val)}
-        // Voice Morphing Props
+        // Voice Morphing & Studio EQ Props
         activePresetId={activePresetId}
         onSelectPreset={handleSelectPreset}
         pitchSemitones={pitchSemitones}
         onChangePitch={handleChangePitch}
-        toneBrightness={toneBrightness}
-        onChangeTone={handleChangeTone}
+        bassGain={bassGain}
+        onChangeBass={handleChangeBass}
+        midGain={midGain}
+        onChangeMid={handleChangeMid}
+        trebleGain={trebleGain}
+        onChangeTreble={handleChangeTreble}
         volume={volume}
         onChangeVolume={handleChangeVolume}
+        onResetEffects={handleResetEffects}
       />
 
       {/* Video Preview & Save Modal */}
