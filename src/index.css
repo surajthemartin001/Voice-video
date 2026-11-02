@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+/* Custom scrollbar for control panel */
+#panel::-webkit-scrollbar {
+  width: 6px;
+}
+#panel::-webkit-scrollbar-track {
+  background: rgba(10, 18, 50, 0.4);
+  border-radius: 9999px;
+}
+#panel::-webkit-scrollbar-thumb {
+  background: rgba(135, 206, 235, 0.35);
+  border-radius: 9999px;
+}
+#panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(135, 206, 235, 0.6);
+}
